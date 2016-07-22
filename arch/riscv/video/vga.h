@@ -1,0 +1,20 @@
+#define VIDEO_CR_BASE      0x0
+#define VIDEO_CR_BASE_HIGH 0x1
+#define VIDEO_CR_DEPTH     0x2
+#define VIDEO_CR_ENABLE    0x3
+#define VIDEO_CR_POLARITY  0x4
+#define VIDEO_CR_PXLFREQ   0x5
+#define VIDEO_CR_FB_WIDTH  0x6
+#define VIDEO_CR_FB_HEIGHT 0x7
+#define VIDEO_CR_FB_BPL    0x8
+#define VIDEO_CR_BG_COLOR  0x9
+
+#define VIDEO_CR_H_TOTAL    0x10
+#define VIDEO_CR_H_END_DISP 0x11
+#define VIDEO_CR_H_SRT_SYNC 0x12
+#define VIDEO_CR_H_END_SYNC 0x13
+#define VIDEO_CR_V_TOTAL    0x14
+#define VIDEO_CR_V_END_DISP 0x15
+#define VIDEO_CR_V_SRT_SYNC 0x16
+#define VIDEO_CR_V_END_SYNC 0x17
+
