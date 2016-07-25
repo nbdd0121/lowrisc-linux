@@ -78,7 +78,7 @@ static int iris_check_var(struct fb_var_screeninfo *var, struct fb_info *info) {
 
     int log2depth = ilog2(depth);
     int log2xres = ilog2(var->xres - 1) + 1;
-    int log2bpl = log2xres + log2depth;
+    int log2bpl = log2xres + log2depth - 3;
 
     // No enough video memory
     if (var->yres << log2bpl > VIDEOMEM_SIZE)
@@ -165,10 +165,10 @@ static int iris_set_par(struct fb_info *info) {
     iowrite32(5 - log2depth, par->reg + VIDEO_CR_DEPTH);
     iowrite32(info->var.xres, par->reg + VIDEO_CR_FB_WIDTH);
     iowrite32(info->var.yres, par->reg + VIDEO_CR_FB_HEIGHT);
-    iowrite32(info->var.xres_virtual << log2depth, par->reg + VIDEO_CR_FB_BPL);
+    iowrite32(info->var.xres_virtual << (log2depth - 3), par->reg + VIDEO_CR_FB_BPL);
     iowrite32(1, par->reg + VIDEO_CR_ENABLE);
 
-    info->fix.line_length = info->var.xres_virtual << log2depth;
+    info->fix.line_length = info->var.xres_virtual << (log2depth - 3);
 
     printk(KERN_INFO "lowRISC Iris: mode is %dx%dx%d, line length=%d", info->var.xres, info->var.yres, info->var.bits_per_pixel, info->fix.line_length);
     
@@ -195,7 +195,7 @@ static int iris_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
     uintptr_t mem = info->fix.smem_start;
     int log2bpl = ilog2(info->fix.line_length);
     int log2depth = ilog2(var->bits_per_pixel);
-    mem += (var->yoffset << log2bpl) + (var->xoffset << log2depth);
+    mem += (var->yoffset << log2bpl) + (var->xoffset << (log2depth - 3));
     iowrite32((uint32_t)mem, par->reg + VIDEO_CR_BASE);
     iowrite32((uint32_t)(mem >> 32), par->reg + VIDEO_CR_BASE_HIGH);
     return 0;
@@ -267,6 +267,7 @@ static int iris_probe(struct platform_device *dev) {
     // Write base registers
     iowrite32((uint32_t)(uintptr_t)phymem, par->reg + VIDEO_CR_BASE);
     iowrite32((uint32_t)((uintptr_t)phymem >> 32), par->reg + VIDEO_CR_BASE_HIGH);
+    iowrite32(0, par->reg + VIDEO_CR_BG_COLOR);
 
     // Set mode (reuse some routines)
     iris_check_var(&info->var, info);
