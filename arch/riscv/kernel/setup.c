@@ -3,12 +3,17 @@
 #include <linux/memblock.h>
 #include <linux/sched.h>
 #include <linux/initrd.h>
+#include <linux/device.h>
+#include <linux/platform_device.h>
+#include <linux/spi/spi.h>
+#include <linux/spi/xilinx_spi.h>
 
 #include <asm/setup.h>
 #include <asm/sections.h>
 #include <asm/pgtable.h>
 #include <asm/smp.h>
 #include <asm/sbi.h>
+#include <asm/config-string.h>
 
 static char __initdata command_line[COMMAND_LINE_SIZE];
 #ifdef CONFIG_CMDLINE_BOOL
@@ -111,6 +116,68 @@ static void __init setup_bootmem(void)
 	reserve_boot_page_table(pfn_to_virt(csr_read(sptbr)));
 	memblock_allow_resize();
 }
+
+// TODO: the following should all be handled by devicetree
+
+static struct resource lowrisc_spi[] = {
+	[0] = {
+		.start = 0,
+		.end   = 0xFF,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+static struct xspi_platform_data xspi_info = {
+	.num_chipselect = 1,
+	.bits_per_word = 8,
+	.devices = NULL,
+	.num_devices = 0,
+};
+
+static struct platform_device xspi_device = {
+	.name = "xilinx_spi",
+	.id = 0, /* Bus number */
+	.num_resources = ARRAY_SIZE(lowrisc_spi),
+	.resource = lowrisc_spi,
+	.dev = {
+		.platform_data = &xspi_info, /* Passed to driver */
+	},
+};
+
+static struct spi_board_info lowrisc_spi_board_info[] __initdata = {
+#if IS_ENABLED(CONFIG_MMC_SPI)
+	{
+		.modalias = "mmc_spi",
+		.max_speed_hz = 25000000,     /* max spi clock (SCK) speed in HZ */
+		.bus_num = 0,
+		.chip_select = 0,
+		.mode = SPI_MODE_0,
+	},
+#endif
+};
+
+static int __init lowrisc_setup_devinit(void)
+{
+	int ret;
+	u64 spi_addr;
+
+#if IS_ENABLED(CONFIG_SPI_XILINX)
+	// Find config string driver
+	struct device *csdev = bus_find_device_by_name(&platform_bus_type, NULL, "config-string");
+	struct platform_device *pcsdev = to_platform_device(csdev);
+	spi_addr = config_string_u64(pcsdev, "spi.addr");
+	lowrisc_spi[0].start += spi_addr;
+	lowrisc_spi[0].end += spi_addr;
+	ret = platform_device_register(&xspi_device);
+
+	spi_register_board_info(lowrisc_spi_board_info, ARRAY_SIZE(lowrisc_spi_board_info));
+#endif
+
+	return 0;
+}
+
+device_initcall(lowrisc_setup_devinit);
+
 
 void __init setup_arch(char **cmdline_p)
 {
