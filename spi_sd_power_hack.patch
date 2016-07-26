@@ -1,0 +1,24 @@
+diff --git a/home/asb58/scratch/lowrisc-chip-update2/riscv-tools/linux-4.6.2/drivers/spi/spi-xilinx.c b/drivers/spi/spi-xilinx.c
+index 3009121..3bb4140 100644
+--- a/drivers/spi/spi-xilinx.c
++++ b/drivers/spi/spi-xilinx.c
+@@ -183,6 +183,9 @@ static void xspi_init_hw(struct xilinx_spi *xspi)
+ 	xspi->write_fn(XSPI_CR_MANUAL_SSELECT |	XSPI_CR_MASTER_MODE |
+ 		XSPI_CR_ENABLE | XSPI_CR_TXFIFO_RESET |	XSPI_CR_RXFIFO_RESET,
+ 		regs_base + XSPI_CR_OFFSET);
++
++	/* HACK: Turn on power pin used for SD card */
++	xspi->write_fn(0, regs_base);
+ }
+ 
+ static void xilinx_spi_chipselect(struct spi_device *spi, int is_on)
+@@ -504,6 +507,9 @@ static int xilinx_spi_remove(struct platform_device *pdev)
+ 
+ 	spi_master_put(xspi->bitbang.master);
+ 
++	/* HACK: turn off power pin used for SD card */
++	xspi->write_fn(1, regs_base);
++
+ 	return 0;
+ }
+ 

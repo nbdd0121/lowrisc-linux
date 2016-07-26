@@ -18,6 +18,8 @@ Overlay the `riscv` architecture-specific subtree onto an upstream release:
         $ git remote add -t master origin https://github.com/riscv/riscv-linux.git
         $ git fetch
         $ git checkout -f -t origin/master
+        # lowRISC-specific hack for enabling power pin for SD card
+        $ patch -p1 spi_sd_power_hack.patch
 
 Note that the `-t <branch>` option minimizes the history fetched.
 To add another branch:
