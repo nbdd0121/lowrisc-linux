@@ -76,8 +76,11 @@ static int iris_check_var(struct fb_var_screeninfo *var, struct fb_info *info) {
     if (depth == 0 || abs(depth - var->bits_per_pixel) >= 8)
         depth = var->bits_per_pixel;
 
+    // Normalize xres_virtual
+    if (var->xres_virtual < var->xres) var->xres_virtual = var->xres;
+
     int log2depth = ilog2(depth);
-    int log2xres = ilog2(var->xres - 1) + 1;
+    int log2xres = ilog2(var->xres_virtual - 1) + 1;
     int log2bpl = log2xres + log2depth - 3;
 
     // No enough video memory
