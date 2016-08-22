@@ -57,10 +57,10 @@ KBUILD_CFLAGS += -mno-save-restore
 
 head-y := arch/riscv/kernel/head.o
 
-core-y += arch/riscv/kernel/ arch/riscv/mm/ arch/riscv/video/
+core-y += arch/riscv/kernel/ arch/riscv/mm/
 
 libs-y += arch/riscv/lib/
 
-drivers-y += arch/riscv/drivers/
+drivers-y += arch/riscv/drivers/ arch/riscv/video/ arch/riscv/videox/
 
 all: vmlinux
