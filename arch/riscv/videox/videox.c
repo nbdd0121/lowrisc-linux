@@ -15,12 +15,12 @@
 #include <linux/timer.h>
 
 enum status {
-    INIT,
-    RD_LOW_SENT,
-    RD_HIGH_SENT,
-    WR_LOW_SENT,
-    WR_HIGH_SENT,
-    OP_SENT
+    SEND_OP,
+    SEND_SRC_1,
+    SEND_DEST_1,
+    SEND_SRC_REST,
+    SEND_DEST_REST,
+    SENT
 };
 
 struct request {
@@ -34,8 +34,23 @@ struct request {
 struct operation {
     struct list_head list;
     struct request req;
-    struct page *src[1];
-    struct page *dest[1];
+    struct page *src_buf[4];
+    struct page *dest_buf[4];
+    struct page **src;
+    struct page **dest;
+    int src_cnt;
+    int dest_cnt;
+
+    // Tracking issuing status
+    int src_ptr;
+    int dest_ptr;
+
+    // Calculated values
+    int src_first_len;
+    int src_last_len;
+    int dest_first_len;
+    int dest_last_len;
+
     int status;
 };
 
@@ -65,19 +80,39 @@ static LIST_HEAD(sent_ops);
 
 
 /* Allocate an new pending_op struct */
-static struct operation* op_new(void) {
+static struct operation* op_new(int src_cnt, int dest_cnt) {
     struct operation* op = kzalloc(sizeof(struct operation), GFP_KERNEL);
+
+    if (src_cnt > 4)
+        op->src = kzalloc(sizeof(struct page*) * src_cnt, GFP_KERNEL);
+    else
+        op->src = op->src_buf;
+
+    if (dest_cnt > 4)
+        op->dest = kzalloc(sizeof(struct page*) * dest_cnt, GFP_KERNEL);
+    else
+        op->dest = op->dest_buf;
+
+    op->src_cnt  = src_cnt;
+    op->dest_cnt = dest_cnt;
     return op;
 }
 
 /* Free an new pending_op struct */
 static void op_delete(struct operation* op) {
     kfree(op);
+    if (op->src != op->src_buf) kfree(op->src);
+    if (op->dest != op->dest_buf) kfree(op->dest);
 }
 
 /* Return pages to kernel */
 static void op_cleanup(struct operation* op) {
-    for (int i = 0; i < 1; i++) {
+    for (int i = 0; i < op->src_cnt; i++) {
+        if (op->src[i]) {
+            put_page(op->src[i]);
+        }
+    }
+    for (int i = 0; i < op->dest_cnt; i++) {
         if (op->dest[i]) {
             set_page_dirty(op->dest[i]);
             put_page(op->dest[i]);
@@ -90,6 +125,11 @@ static void polling_loop(void) {
     printk(KERN_INFO "lowRISC videox: Start single event loop\n");
     while (1) {
         uint32_t reg = ioread32(ctrl_reg);
+        uint32_t src_reg = ioread32(ctrl_reg + 8);
+        uint32_t dest_reg = ioread32(ctrl_reg + 16);
+
+        printk(KERN_INFO "lowRISC videox: reg = %d, src_reg = %d, dest_reg = %d\n", reg, src_reg, dest_reg);
+
         if (reg == 0 && !list_empty(&sent_ops)) {
             printk(KERN_INFO "lowRISC videox: Cleaning up finished queue...\n");
             // Pop all finished instructions
@@ -101,36 +141,117 @@ static void polling_loop(void) {
             }
         }
 
-        if (reg != 32 && !list_empty(&pending_ops)) {
+        if (!list_empty(&pending_ops)) {
             struct operation* op = list_entry(pending_ops.next, struct operation, list);
-            uint32_t inst;
+            uint64_t inst;
             switch(op->status) {
-                case INIT:
-                    inst = 2 | (uint32_t)page_to_phys(op->src[0]);
-                    op->status = RD_LOW_SENT;
+                case SEND_OP: {
+                    // Make sure we can send an opcode
+                    if(reg == 128) return;
+                    inst = ((op->req.attr & 63) << 27) | op->req.opcode;
+                    printk(KERN_INFO "lowRISC videox: Issue opcode %08llx\n", inst);
+                    iowrite32((uint32_t)inst, ctrl_reg);
+
+                    // Switch to SEND_SRC_1 state
+                    // We send opcode first to reduce latency by a few cycles
+                    op->status = SEND_SRC_1;
                     break;
-                case RD_LOW_SENT:
-                    inst = (uint32_t)(page_to_phys(op->src[0]) >> 32);
-                    op->status = RD_HIGH_SENT;
+                }
+                case SEND_SRC_1: {
+                    // Make sure we can send src
+                    if(src_reg == 128) return;
+
+                    inst = (page_to_phys(op->src[0]) << 21) | (op->src_first_len << 5);
+
+                    // Set last flag is this is last chunk
+                    if (op->src_cnt == 1) inst |= 1;
+
+                    printk(KERN_INFO "lowRISC videox: Issue source %016llx\n", inst);
+                    iowrite32((uint32_t)inst, ctrl_reg + 8);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 12);
+
+                    // Switch to SEND_DEST_1 state
+                    // We send src first so data movers can feeding data
+                    // And we'll send dest meanwhile
+                    op->status = SEND_DEST_1;
+                    op->src_ptr = 1;
                     break;
-                case RD_HIGH_SENT:
-                    inst = 3 | (uint32_t)page_to_phys(op->dest[0]);
-                    op->status = WR_LOW_SENT;
+                }
+                case SEND_DEST_1:
+                    // Make sure we can send dest
+                    if(dest_reg == 128) return;
+                    inst = (page_to_phys(op->dest[0]) << 21) | (op->dest_first_len << 5);
+                    printk(KERN_INFO "lowRISC videox: Issue destination %016llx\n", inst);
+                    iowrite32((uint32_t)inst, ctrl_reg + 16);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 20);
+ 
+                    // Switch to SEND_SRC_REST state
+                    // After first dest command is sent, the data mover should be able to work
+                    // without blocking, then we can send rest to FIFO
+                    op->dest_ptr = 1;
+                    if (op->src_cnt > 1) {
+                        op->status = SEND_SRC_REST;
+                    } else if (op->dest_cnt > 1) {
+                        op->status = SEND_DEST_REST;
+                    } else {
+                        op->status = SENT;
+                        list_del(&op->list);
+                        list_add_tail(&op->list, &sent_ops);
+                    }
                     break;
-                case WR_LOW_SENT:
-                    inst = (uint32_t)(page_to_phys(op->dest[0]) >> 32);
-                    op->status = WR_HIGH_SENT;
+                case SEND_SRC_REST:
+                    // Make sure we can send src
+                    if(src_reg == 128) return;
+
+                    inst = page_to_phys(op->src[op->src_ptr++]) << 21;
+
+                    if (op->src_cnt == op->src_ptr)
+                        inst |= op->src_last_len << 5;
+                    else
+                        inst |= PAGE_SIZE << 5;
+
+                    // Set last flag is this is last chunk
+                    if (op->src_cnt == op->src_ptr) inst |= 1;
+
+                    printk(KERN_INFO "lowRISC videox: Issue source %016llx\n", inst);
+                    iowrite32((uint32_t)inst, ctrl_reg + 8);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 12);
+
+                    if (op->src_cnt > op->src_ptr) {
+                        // Keep in current state if more blocks should be sent
+                    } else if (op->dest_cnt > 1) {
+                        op->status = SEND_DEST_REST;
+                    } else {
+                        op->status = SENT;
+                        list_del(&op->list);
+                        list_add_tail(&op->list, &sent_ops);
+                    }
                     break;
-                case WR_HIGH_SENT:
-                    inst = (uint32_t)(((op->req.attr & 63) << 27) | (op->req.len << 14) | op->req.opcode);
-                    op->status = OP_SENT;
-                    list_del(&op->list);
-                    list_add_tail(&op->list, &sent_ops);
+                case SEND_DEST_REST:
+                    // Make sure we can send dest
+                    if(dest_reg == 128) return;
+
+                    inst = page_to_phys(op->dest[op->dest_ptr++]) << 21;
+
+                    if (op->dest_cnt == op->dest_ptr)
+                        inst |= op->dest_last_len << 5;
+                    else
+                        inst |= PAGE_SIZE << 5;
+
+                    printk(KERN_INFO "lowRISC videox: Issue destination %016llx\n", inst);
+                    iowrite32((uint32_t)inst, ctrl_reg + 16);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 20);
+ 
+                    if (op->dest_cnt > op->dest_ptr) {
+                        // Keep in current state if more blocks should be sent
+                    } else {
+                        op->status = SENT;
+                        list_del(&op->list);
+                        list_add_tail(&op->list, &sent_ops);
+                    }
                     break;
                 default: BUG();
             }
-            printk(KERN_INFO "lowRISC videox: Issue instruction %08x\n", inst);
-            iowrite32(inst, ctrl_reg);
             continue;
         }
 
@@ -161,12 +282,13 @@ static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         // Aligned access is required
         if (((uintptr_t)req.src & 63) != 0 ||
             ((uintptr_t)req.dest & 63) != 0 ||
-            (req.len & 63) != 0 ||
-            req.len > 8128)
+            (req.len & 63) != 0)
             return -EINVAL;
 
         // We current assume page is 4K        
         BUILD_BUG_ON((1 << PAGE_SHIFT) != SZ_4K);
+
+        int dest_len = req.len;
 
         // Calculation start and end address
         uintptr_t src_start_page = ((uintptr_t)req.src & PAGE_MASK) >> PAGE_SHIFT;
@@ -174,26 +296,11 @@ static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         uintptr_t src_npage = src_end_page - src_start_page + 1;
 
         uintptr_t dest_start_page = ((uintptr_t)req.dest & PAGE_MASK) >> PAGE_SHIFT;
-        uintptr_t dest_end_page = (((uintptr_t)req.dest + req.len - 1) & PAGE_MASK) >> PAGE_SHIFT;
+        uintptr_t dest_end_page = (((uintptr_t)req.dest + dest_len - 1) & PAGE_MASK) >> PAGE_SHIFT;
         uintptr_t dest_npage = dest_end_page - dest_start_page + 1;
 
-        if (((uintptr_t)req.src & PAGE_MASK) != (uintptr_t)req.src) {
-            printk(KERN_ERR "lowRISC videox: Without scatter-gather support, currently src must be on page aligned\n");
-            return -ENOSYS;
-        }
-
-        if (((uintptr_t)req.dest & PAGE_MASK) != (uintptr_t)req.dest) {
-            printk(KERN_ERR "lowRISC videox: Without scatter-gather support, currently dest must be on page aligned\n");
-            return -ENOSYS;
-        }
-
-        if (req.len > 4096) {
-            printk(KERN_ERR "lowRISC videox: Without scatter-gather support, currently len cannot be larger than 4K\n");
-            return -ENOSYS;
-        }
-
         // Allocate an pending_op struct
-        struct operation *op = op_new();
+        struct operation *op = op_new(src_npage, dest_npage);
 
         // Fix these user pages into physical memory
         down_read(&current->mm->mmap_sem);
@@ -210,6 +317,11 @@ static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         }
 
         printk(KERN_INFO "lowRISC videox: Fix userspace memory to physical memory\n");
+
+        op->src_first_len = src_start_page == src_end_page ? req.len : PAGE_SIZE - ((uintptr_t)req.src - (src_start_page << PAGE_SHIFT));
+        op->src_last_len = (uintptr_t)req.src + req.len - (src_end_page << PAGE_SHIFT);
+        op->dest_first_len = dest_start_page == dest_end_page ? dest_len : PAGE_SIZE - ((uintptr_t)req.dest - (dest_start_page << PAGE_SHIFT));
+        op->dest_last_len = (uintptr_t)req.dest + dest_len - (dest_end_page << PAGE_SHIFT);
 
         // Now finish initialization of pending_op and add it to the queue
         op->req = req;
@@ -251,12 +363,6 @@ static int __init videox_init(void) {
     }
 
     ctrl_reg = ioremap_nocache(0x40012000, SZ_4K); 
-
-    // Initialize accelerator by setting base address to 0
-    iowrite32(2, ctrl_reg);
-    iowrite32(0, ctrl_reg);
-    iowrite32(3, ctrl_reg);
-    iowrite32(0, ctrl_reg);
 
     printk(KERN_INFO "lowRISC videox: Registered as an misc device\n");
     return 0;
