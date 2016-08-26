@@ -46,9 +46,8 @@ struct operation {
     int dest_ptr;
 
     // Calculated values
-    int src_first_len;
+    int dest_len;
     int src_last_len;
-    int dest_first_len;
     int dest_last_len;
 
     int status;
@@ -161,7 +160,9 @@ static void polling_loop(void) {
                     // Make sure we can send src
                     if(src_reg == 128) return;
 
-                    inst = (page_to_phys(op->src[0]) << 21) | (op->src_first_len << 5);
+                    uintptr_t offset = (uintptr_t)op->req.src &~ PAGE_MASK;
+                    uintptr_t length = PAGE_SIZE - offset > op->req.len ? op->req.len : PAGE_SIZE - offset;
+                    inst = ((page_to_phys(op->src[0]) + offset) << 21) | (length << 5);
 
                     // Set last flag is this is last chunk
                     if (op->src_cnt == 1) inst |= 1;
@@ -180,7 +181,10 @@ static void polling_loop(void) {
                 case SEND_DEST_1:
                     // Make sure we can send dest
                     if(dest_reg == 128) return;
-                    inst = (page_to_phys(op->dest[0]) << 21) | (op->dest_first_len << 5);
+
+                    uintptr_t offset = (uintptr_t)op->req.dest &~ PAGE_MASK;
+                    uintptr_t length = PAGE_SIZE - offset > op->dest_len ? op->dest_len : PAGE_SIZE - offset;
+                    inst = ((page_to_phys(op->dest[0]) + offset) << 21) | (length << 5);
                     printk(KERN_INFO "lowRISC videox: Issue destination %016llx\n", inst);
                     iowrite32((uint32_t)inst, ctrl_reg + 16);
                     iowrite32((uint32_t)(inst >> 32), ctrl_reg + 20);
@@ -318,9 +322,8 @@ static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
         printk(KERN_INFO "lowRISC videox: Fix userspace memory to physical memory\n");
 
-        op->src_first_len = src_start_page == src_end_page ? req.len : PAGE_SIZE - ((uintptr_t)req.src - (src_start_page << PAGE_SHIFT));
+        op->dest_len = dest_len;
         op->src_last_len = (uintptr_t)req.src + req.len - (src_end_page << PAGE_SHIFT);
-        op->dest_first_len = dest_start_page == dest_end_page ? dest_len : PAGE_SIZE - ((uintptr_t)req.dest - (dest_start_page << PAGE_SHIFT));
         op->dest_last_len = (uintptr_t)req.dest + dest_len - (dest_end_page << PAGE_SHIFT);
 
         // Now finish initialization of pending_op and add it to the queue
