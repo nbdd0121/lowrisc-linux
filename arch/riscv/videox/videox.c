@@ -14,6 +14,8 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 
+#define printk(...)
+
 enum status {
     SEND_OP,
     SEND_SRC_1,
@@ -264,6 +266,11 @@ static void polling_loop(void) {
     printk(KERN_INFO "lowRISC videox: Finish event loop\n");
 }
 
+static size_t compute_result_len(int opcode, size_t len) {
+    if (opcode == 11) return len * 2;
+    return len;
+}
+
 static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     printk(KERN_INFO "lowRISC videox: Received ioctl request %d with argument %lx\n", cmd, arg);
     if (cmd == 0) {
@@ -279,7 +286,7 @@ static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         // Load operation to do from user space
         copy_from_user(&req, (void*)arg, sizeof(struct request));
 
-        if (req.opcode < 8 || req.opcode > 8) {
+        if (req.opcode < 8 || req.opcode > 12) {
             return -EINVAL;
         }
 
@@ -292,7 +299,7 @@ static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         // We current assume page is 4K        
         BUILD_BUG_ON((1 << PAGE_SHIFT) != SZ_4K);
 
-        int dest_len = req.len;
+        size_t dest_len = compute_result_len(req.opcode, req.len);
 
         // Calculation start and end address
         uintptr_t src_start_page = ((uintptr_t)req.src & PAGE_MASK) >> PAGE_SHIFT;
