@@ -16,8 +16,9 @@
 
 #define printk(...)
 
+#define NR_FUN_UNITS 3
+
 enum status {
-    SEND_OP,
     SEND_SRC_1,
     SEND_DEST_1,
     SEND_SRC_REST,
@@ -125,13 +126,12 @@ static void op_cleanup(struct operation* op) {
 static void polling_loop(void) {
     printk(KERN_INFO "lowRISC videox: Start single event loop\n");
     while (1) {
-        uint32_t reg = ioread32(ctrl_reg);
-        uint32_t src_reg = ioread32(ctrl_reg + 8);
-        uint32_t dest_reg = ioread32(ctrl_reg + 16);
+        uint32_t src_reg = ioread32(ctrl_reg + 0);
+        uint32_t dest_reg = ioread32(ctrl_reg + 8);
 
-        printk(KERN_INFO "lowRISC videox: reg = %d, src_reg = %d, dest_reg = %d\n", reg, src_reg, dest_reg);
+        printk(KERN_INFO "lowRISC videox: src_reg = %d, dest_reg = %d\n", src_reg, dest_reg);
 
-        if (reg == 0 && !list_empty(&sent_ops)) {
+        if (dest_reg == 0 && !list_empty(&sent_ops)) {
             printk(KERN_INFO "lowRISC videox: Cleaning up finished queue...\n");
             // Pop all finished instructions
             struct operation *op, *next;
@@ -146,32 +146,20 @@ static void polling_loop(void) {
             struct operation* op = list_entry(pending_ops.next, struct operation, list);
             uint64_t inst;
             switch(op->status) {
-                case SEND_OP: {
-                    // Make sure we can send an opcode
-                    if(reg == 128) return;
-                    inst = ((op->req.attr & 63) << 27) | op->req.opcode;
-                    printk(KERN_INFO "lowRISC videox: Issue opcode %08llx\n", inst);
-                    iowrite32((uint32_t)inst, ctrl_reg);
-
-                    // Switch to SEND_SRC_1 state
-                    // We send opcode first to reduce latency by a few cycles
-                    op->status = SEND_SRC_1;
-                    break;
-                }
                 case SEND_SRC_1: {
                     // Make sure we can send src
                     if(src_reg == 128) return;
 
                     uintptr_t offset = (uintptr_t)op->req.src &~ PAGE_MASK;
                     uintptr_t length = PAGE_SIZE - offset > op->req.len ? op->req.len : PAGE_SIZE - offset;
-                    inst = ((page_to_phys(op->src[0]) + offset) << 21) | (length << 5);
+                    inst = (page_to_phys(op->src[0]) + offset) | (length << 34) | (op->req.opcode & 7) | ((op->req.attr & 255ull) << 56);
 
                     // Set last flag is this is last chunk
-                    if (op->src_cnt == 1) inst |= 1;
+                    if (op->src_cnt == 1) inst |= 1ull << 55;
 
                     printk(KERN_INFO "lowRISC videox: Issue source %016llx\n", inst);
-                    iowrite32((uint32_t)inst, ctrl_reg + 8);
-                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 12);
+                    iowrite32((uint32_t)inst, ctrl_reg + 0);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 4);
 
                     // Switch to SEND_DEST_1 state
                     // We send src first so data movers can feeding data
@@ -186,10 +174,10 @@ static void polling_loop(void) {
 
                     uintptr_t offset = (uintptr_t)op->req.dest &~ PAGE_MASK;
                     uintptr_t length = PAGE_SIZE - offset > op->dest_len ? op->dest_len : PAGE_SIZE - offset;
-                    inst = ((page_to_phys(op->dest[0]) + offset) << 21) | (length << 5);
+                    inst = (page_to_phys(op->dest[0]) + offset) | (length << 34) | (op->req.opcode & 7) | ((op->req.attr & 255ull) << 56);
                     printk(KERN_INFO "lowRISC videox: Issue destination %016llx\n", inst);
-                    iowrite32((uint32_t)inst, ctrl_reg + 16);
-                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 20);
+                    iowrite32((uint32_t)inst, ctrl_reg + 8);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 12);
  
                     // Switch to SEND_SRC_REST state
                     // After first dest command is sent, the data mover should be able to work
@@ -209,19 +197,19 @@ static void polling_loop(void) {
                     // Make sure we can send src
                     if(src_reg == 128) return;
 
-                    inst = page_to_phys(op->src[op->src_ptr++]) << 21;
+                    inst = page_to_phys(op->src[op->src_ptr++]);
 
                     if (op->src_cnt == op->src_ptr)
-                        inst |= op->src_last_len << 5;
+                        inst |= (uintptr_t)op->src_last_len << 34;
                     else
-                        inst |= PAGE_SIZE << 5;
+                        inst |= (uintptr_t)PAGE_SIZE << 34;
 
                     // Set last flag is this is last chunk
-                    if (op->src_cnt == op->src_ptr) inst |= 1;
+                    if (op->src_cnt == op->src_ptr) inst |= 1ull << 55;
 
                     printk(KERN_INFO "lowRISC videox: Issue source %016llx\n", inst);
-                    iowrite32((uint32_t)inst, ctrl_reg + 8);
-                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 12);
+                    iowrite32((uint32_t)inst, ctrl_reg + 0);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 4);
 
                     if (op->src_cnt > op->src_ptr) {
                         // Keep in current state if more blocks should be sent
@@ -237,16 +225,16 @@ static void polling_loop(void) {
                     // Make sure we can send dest
                     if(dest_reg == 128) return;
 
-                    inst = page_to_phys(op->dest[op->dest_ptr++]) << 21;
+                    inst = page_to_phys(op->dest[op->dest_ptr++]);
 
                     if (op->dest_cnt == op->dest_ptr)
-                        inst |= op->dest_last_len << 5;
+                        inst |= (uintptr_t)op->dest_last_len << 34;
                     else
-                        inst |= PAGE_SIZE << 5;
+                        inst |= (uintptr_t)PAGE_SIZE << 34;
 
                     printk(KERN_INFO "lowRISC videox: Issue destination %016llx\n", inst);
-                    iowrite32((uint32_t)inst, ctrl_reg + 16);
-                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 20);
+                    iowrite32((uint32_t)inst, ctrl_reg + 8);
+                    iowrite32((uint32_t)(inst >> 32), ctrl_reg + 12);
  
                     if (op->dest_cnt > op->dest_ptr) {
                         // Keep in current state if more blocks should be sent
@@ -266,8 +254,23 @@ static void polling_loop(void) {
     printk(KERN_INFO "lowRISC videox: Finish event loop\n");
 }
 
-static size_t compute_result_len(int opcode, size_t len) {
-    if (opcode == 11) return len * 2;
+static size_t compute_result_len(int opcode, int attrib, size_t len) {
+    if (opcode == 1) {
+        len *= 2;
+        if (attrib & 1) {
+            opcode = 2;
+            attrib >>= 1;
+        }
+    }
+    if (opcode == 2) {
+        if (attrib & 1) {
+            opcode = 3;
+            attrib >>= 1;
+        }
+    }
+    if (opcode == 3) {
+        len /= 2;
+    }
     return len;
 }
 
@@ -279,27 +282,26 @@ static long videox_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         put_user(!list_empty(&sent_ops) || !list_empty(&pending_ops), (int*)arg);
         return 0;
     } else if (cmd == 1) {
-        if (ioread32(ctrl_reg) == 32) return -EAGAIN;
-
         struct request req;
 
         // Load operation to do from user space
         copy_from_user(&req, (void*)arg, sizeof(struct request));
 
-        if (req.opcode < 8 || req.opcode > 12) {
+        if (req.opcode < 0 || req.opcode > NR_FUN_UNITS) {
             return -EINVAL;
         }
+
+        size_t dest_len = compute_result_len(req.opcode, req.attr, req.len);
 
         // Aligned access is required
         if (((uintptr_t)req.src & 63) != 0 ||
             ((uintptr_t)req.dest & 63) != 0 ||
-            (req.len & 63) != 0)
+            (req.len & 63) != 0 ||
+            (dest_len & 63) != 0)
             return -EINVAL;
 
         // We current assume page is 4K        
         BUILD_BUG_ON((1 << PAGE_SHIFT) != SZ_4K);
-
-        size_t dest_len = compute_result_len(req.opcode, req.len);
 
         // Calculation start and end address
         uintptr_t src_start_page = ((uintptr_t)req.src & PAGE_MASK) >> PAGE_SHIFT;
